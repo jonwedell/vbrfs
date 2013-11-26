@@ -16,22 +16,131 @@
 
 import os
 import sys
-
+import time
 import errno
 import StringIO
 import optparse
 import subprocess
-import multiprocessing
+import threading
+from multiprocessing import cpu_count
 from fuse import FUSE, FuseOSError, Operations
 
 
+class backgroundTask():
+
+    def __init__(self, host):
+        self.host = host
+
+    def run(self):
+        while True:
+            job = None
+            with self.host.slock:
+                if self.host.dead:
+                    os._exit(0)
+                if len(self.host.process_list) > 0:
+                    job = self.host.process_list.pop(0)
+
+            if job is not None:
+                job.encode()
+            else:
+                time.sleep(.1)
+                to_remove = []
+                now = time.time()
+                with self.host.slock:
+                    for key in self.host.known_files:
+                        if self.host.known_files[key].last_read + options.cachetime < now:
+                            to_remove.append(key)
+                    for item in to_remove:
+                        if options.debug: print "uncaching(",item,")"
+                        del self.host.known_files[item]
+
+class conversionObj():
+
+    def __init__(self, abspath):
+        """ Initialize! """
+        self.path = abspath
+        self.last_read = time.time()
+        self.lock = threading.Lock()
+        self.status = 0
+
+        # Transcoded info
+        self.encoded = 0
+        self.size = os.path.getsize(abspath)
+        self.data = StringIO.StringIO()
+
+    def encode(self):
+        """ Start the transcode process, release the lock once in a while to allow other threads to read from the transcoded file before the transcoding completes."""
+
+        # We are changing ourself, don't allow concurrent access
+        with self.lock:
+            # Don't encode ourselves twice
+            if self.status != 0:
+                return
+            self.status == 1
+
+        # First get the tags
+        tag_cmd = subprocess.Popen(['metaflac', '--export-tags-to', '-', self.path],stdout=subprocess.PIPE)
+        tags = {}
+        for sp in map(lambda x:x.partition("="), tag_cmd.stdout.read().split("\n")):
+            if sp[0]:
+                tags[sp[0]] = sp[2]
+        tag_cmd.wait()
+
+        # Then get the decoded FLAC stream
+        flac = subprocess.Popen(['flac', '-c', '-d', self.path],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Then set up the lame arguments and call lame
+        lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?'), '-', '-']
+        lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
+
+        # Read the transcoded data in 150000 bit chunks
+        while True:
+            buff_read = lame.stdout.read(150000)
+            # Lock before changing ourself
+            with self.lock:
+                self.data.seek(0,2)
+                self.data.write(buff_read)
+                self.encoded += len(buff_read)
+                if len(buff_read) < 150000:
+                    self.size = self.encoded
+                    self.status = 2
+                    break
+
+        # Wait for the processes to finish (in practice they are already done)
+        flac.wait()
+        lame.wait()
+
+
+    def read(self,offset,length):
+        """ Read data from the file. Will return as soon as enough of the file is transcoded to meet the request."""
+        data = None
+        while data is None:
+            with self.lock:
+                if self.encoded > (offset + length) or self.status == 2:
+                    self.data.seek(offset)
+                    data = self.data.read(length)
+            if data is None:
+                time.sleep(.1)
+
+        self.last_read = time.time()
+        return data
 
 
 class vbrConvert(Operations):
 
     def __init__(self, root):
         self.root = root
+        self.dead = False
+        self.slock = threading.Lock()
         self.known_files = {}
+        self.process_list = []
+
+        # Multi-thread our work
+        self.workers = []
+        for x in range(options.threads):
+            worker = backgroundTask(self)
+            worker.daemon = True
+            self.workers.append(threading.Thread(target=worker.run))
+        for thread in self.workers: thread.start()
 
     # Helpers
     # =======
@@ -54,34 +163,27 @@ class vbrConvert(Operations):
         if path in self.known_files:
             return
 
-        if os.path.isfile(self._full_path(path)):
+        # Don't do anything with existing files
+        if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
             return
 
         # Get the actual path
         abspath = self._absolutePath(path)
 
-        # Don't do anything for non-flac files
-        if not ".flac" in abspath and not ".FLAC" in abspath:
-            return
+        # Start the transcoding of ourself
+        conv_obj = conversionObj(self._absolutePath(path))
+        with self.slock:
+            self.process_list.append(conv_obj)
+            self.known_files[path] = conv_obj
 
-        # First get the tags
-        tag_cmd = subprocess.Popen(['metaflac', '--export-tags-to', '-', abspath],stdout=subprocess.PIPE)
-        tags = {}
-        for sp in map(lambda x:x.partition("="), tag_cmd.stdout.read().split("\n")):
-            if sp[0]:
-                tags[sp[0]] = sp[2]
-        tag_cmd.wait()
+        # Start prefetching
+        if options.prefetch:
+           next_files = os.listdir(os.path.dirname(abspath))
+           ind = next_files.index(os.path.basename(abspath)) + 1
+           for x in range(x,len(next_files)):
+                if
 
-        # Then get the decoded FLAC stream
-        flac = subprocess.Popen(['flac', '-c', '-d', abspath],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # Then set up the lame arguments and call lame
-        lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?'), '-', '-']
-        lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
-        # Create a file-like object with the resulting mp3 stream
-        self.known_files[path] = StringIO.StringIO(lame.stdout.read())
-        # Wait for the processes to finish (in practice they are already done)
-        flac.wait()
-        lame.wait()
+        return
 
 
     # Filesystem methods
@@ -121,8 +223,8 @@ class vbrConvert(Operations):
 
         # Update the size if we have a mp3 version of the file
         if path in self.known_files:
-            self.known_files[path].seek(0,2)
-            res['st_size'] = self.known_files[path].tell()
+            with self.known_files[path].lock:
+                res['st_size'] = self.known_files[path].size
 
         # Return the results
         return res
@@ -210,8 +312,8 @@ class vbrConvert(Operations):
 
         # Find out what to attach them to
         if path in self.known_files:
-            self.known_files[path].seek(offset)
-            return self.known_files[path].read(length)
+
+            return self.known_files[path].read(offset,length)
         else:
             os.lseek(fh, offset, os.SEEK_SET)
             return os.read(fh, length)
@@ -252,15 +354,18 @@ if __name__ == '__main__':
     parser.add_option_group(devel)
 
     # Specify the common arguments
-    basic.add_option("--foreground", action="store_true", dest="foreground", default=False, help="Run this command in the foreground.")
+    basic.add_option("--background", action="store_false", dest="foreground", default=True, help="Run this command in the background. (Currently broken.)")
     basic.add_option("--v", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
-    advanced.add_option("--threads", action="store", dest="threads", default=multiprocessing.cpu_count()-1, type="int", help="How many threads should we use? This ideally should be set to one fewer than the number of cores you have available. Default: %default")
+    basic.add_option("--noprefetch", action="store_false", dest="prefetch", default=True, help="Disable auto-transcoding of files that we expect to be read soon.")
+    advanced.add_option("--threads", action="store", dest="threads", default=cpu_count()-1, type="int", help="How many threads should we use? This ideally should be set to one fewer than the number of cores you have available. Default: %default")
+    advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded MP3s in ram after they are last touched?")
     devel.add_option("--always-conv", action="store_true", dest="attrbconv", default=False, help="Will convert flac->mp3 even for things like 'ls'. Only needed if you want 'ls' to show the right file size, but doing so will be very slow. (You are forcing vbrfs to transcode a directory just to 'ls'.)")
-    devel.add_option("--debug", action="store_true", dest="debug", default=False, help="Print every action sent to the filesystem to stdout.")
+    devel.add_option("--debug", action="store_true", dest="debug", default=False, help="Print every action sent to the filesystem to stdout. Implies --foreground.")
 
     # Options, parse 'em
     (options, args) = parser.parse_args()
 
+    # We can only debug in the foreground.
     if options.debug:
         options.foreground = True
 
@@ -273,4 +378,20 @@ if __name__ == '__main__':
         sys.exit(0)
 
     # Make the magic happen
-    FUSE(vbrConvert(args[0]), args[1], foreground=options.foreground)
+    vbr = vbrConvert(args[0])
+    FUSE(vbr, args[1], foreground=options.foreground)
+
+    # Kill the workers when we exit
+    with vbr.slock:
+        vbr.dead = True
+    sys.exit(0)
+
+    a = conversionObj('/zdrive/NAS/music/Nick Drake/Five Leaves Left/01 - Time Has Told Me.flac')
+    t = threading.Thread(target=a.encode)
+    t.start()
+    while True:
+        with a.lock:
+            if a.status == 2:
+                break
+            print a.encoded
+        time.sleep(.1)
