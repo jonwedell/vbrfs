@@ -17,6 +17,7 @@
 import os
 import sys
 import time
+import stat
 import errno
 import logging
 import StringIO
@@ -30,8 +31,9 @@ from fuse import FUSE, FuseOSError, Operations
 
 class backgroundTask():
 
-    def __init__(self, host):
+    def __init__(self, host, expiration_checker=False):
         self.host = host
+        self.check_expiration = expiration_checker
 
     def run(self):
 
@@ -44,23 +46,43 @@ class backgroundTask():
             if job is not None:
                 logger.debug("encoding( " + unicode(job.path) + " )")
                 job.encode()
-                # Allow garbage collect to remove the encoding object
-                job = None
             else:
-                time.sleep(.01)
+                time.sleep(.1)
 
-            to_remove = []
-            now = time.time()
-            with self.host.slock:
-                for key in self.host.known_files:
-                    conv_obj = self.host.known_files[key]
-                    if options.cachetime != 0 and conv_obj.status == 2 and conv_obj.last_read + options.cachetime < now:
-                        to_remove.append(key)
-                    if conv_obj.status == -1:
-                        to_remove.append(key)
-                for item in to_remove:
-                    logger.debug("uncaching( " + unicode(item) + " )")
-                    del self.host.known_files[item]
+            # If we are assinged garbage checker duties
+            if self.check_expiration:
+
+                to_remove = []
+                now = time.time()
+
+                # Get the list of current conv_objects
+                with self.host.slock:
+                    keys = list(self.host.known_files)
+
+                # Get all of the known files
+                for key in keys:
+                    conv_obj = None
+                    with self.host.slock:
+                        if key in self.host.known_files:
+                            conv_obj = self.host.known_files[key]
+
+                    # The conv_obj was already removed by another thread
+                    if conv_obj is None:
+                        continue
+
+                    with conv_obj.lock:
+                        # Object removed somewhere else
+                        if conv_obj.status == -1:
+                            to_remove.append(key)
+                        # Object passed timeout
+                        if conv_obj.status == 2 and conv_obj.last_read + options.cachetime < now:
+                            to_remove.append(key)
+
+                # Remove the deleted conv_objects from the file hash
+                with self.host.slock:
+                    for item in to_remove:
+                        logger.debug("uncaching( " + unicode(item) + " )")
+                        del self.host.known_files[item]
 
 class conversionObj():
 
@@ -101,20 +123,23 @@ class conversionObj():
         lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?'), '-', '-']
         lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
 
-        # Read the transcoded data in 150000 bit chunks
+        # Read the transcoded data in 16kb chunks
         while True:
-            buff_read = lame.stdout.read(150000)
+            buff_read = lame.stdout.read(131072)
             # Lock before changing ourself
             with self.lock:
+
                 # If we aren't needed anymore just quit
                 if self.status == -1:
+                    lame.terminate()
+                    flac.terminate()
                     return
 
                 # Add the next part of the transcode onto our buffer
                 self.data.seek(0,2)
                 self.data.write(buff_read)
                 self.encoded += len(buff_read)
-                if len(buff_read) < 150000:
+                if len(buff_read) < 131072:
                     self.size = self.encoded
                     self.status = 2
                     break
@@ -126,16 +151,26 @@ class conversionObj():
 
     def read(self,offset,length):
         """ Read data from the file. Will return as soon as enough of the file is transcoded to meet the request."""
+
+        # Don't allow reads from removed objects
+        with self.lock:
+            if self.status == -1:
+                return None
+
         data = None
         while data is None:
+            # We are waiting for a read even if we aren't reading
+            self.last_read = time.time()
+
             with self.lock:
+                if self.status == -1:
+                    return None
                 if self.encoded > (offset + length) or self.status == 2:
                     self.data.seek(offset)
                     data = self.data.read(length)
-            if data is None:
-                time.sleep(.1)
 
-        self.last_read = time.time()
+            if data is None: time.sleep(.1)
+
         return data
 
 
@@ -151,6 +186,7 @@ class vbrConvert(Operations):
         self.workers = []
         for x in range(options.threads):
             worker = backgroundTask(self)
+            if x == 0: worker.check_expiration = True
             the_thread = threading.Thread(target=worker.run)
             the_thread.daemon = True
             self.workers.append(the_thread)
@@ -175,8 +211,7 @@ class vbrConvert(Operations):
     def convFile(self, path, getnext=True):
         # We don't need to convert a given file twice
 
-        if getnext:
-            logger.debug("convFile( " + unicode(path) + " , " + unicode(getnext) + " )")
+        if getnext: logger.debug("convFile( " + unicode(path) + " , " + unicode(getnext) + " )")
 
         with self.slock:
             if path in self.known_files:
@@ -219,20 +254,6 @@ class vbrConvert(Operations):
     # Filesystem methods
     # ==================
 
-    def access(self, path, mode):
-        logger.debug("access( " + unicode(path) + " , " + unicode(mode) + " )")
-        full_path = self._full_path(path)
-        if not os.access(full_path, mode):
-            raise FuseOSError(errno.EACCES)
-
-    def chmod(self, path, mode):
-        logger.debug("chmod( " + unicode(path) + " , " + unicode(mode) + " )")
-        raise FuseOSError(EROFS)
-
-    def chown(self, path, uid, gid):
-        logger.debug("chown( " + unicode(path) + " , " + unicode(uid) + " , " + unicode(gid) + " )")
-        raise FuseOSError(EROFS)
-
     def getattr(self, path, fh=None):
         logger.debug("getattr( " + unicode(path) + " , " + unicode(fh) + " )")
 
@@ -244,12 +265,34 @@ class vbrConvert(Operations):
 
         # Only convert files for getattr requests if option enabled
         if options.attrbconv:
-            self.convFile(path)
+            conv_obj = self.convFile(path)
+            if conv_obj is not None:
+                ready = False
+                while ready is False:
+                    with conv_obj.lock:
+                        if conv_obj.status == 2:
+                            ready = True
+                    time.sleep(.1)
 
         # Stat the file
         st = os.lstat(full_path)
         res =  dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
                      'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+
+        # This makes all files appear to have read-only permissions
+        readonly = """
+        # We want to show all files as read-only only
+        res['st_mode'] =  stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+        # Add the right attributes
+        if os.path.islink(full_path):
+            res['st_mode'] = res['st_mode'] | stat.S_IFLNK
+        elif os.path.isfile(full_path):
+            res['st_mode'] = res['st_mode'] | stat.S_IFREG
+        elif os.path.isdir(full_path):
+            res['st_mode'] = res['st_mode'] | stat.S_IFDIR
+        else:
+            raise OSError(2,"No such file or directory.")
+        """
 
         # Update the size if we have a mp3 version of the file
         if path in self.known_files:
@@ -270,25 +313,13 @@ class vbrConvert(Operations):
             yield r.replace('.flac','.mp3').replace('.FLAC','.MP3')
 
     def readlink(self, path):
-        logger.debug("readline( " + unicode(path) + " )")
+        logger.debug("readlink( " + unicode(path) + " )")
         pathname = os.readlink(self._full_path(path))
         if pathname.startswith("/"):
             # Path name is absolute, sanitize it.
             return os.path.relpath(pathname, self.root)
         else:
             return pathname
-
-    def mknod(self, path, mode, dev):
-        logger.debug("mknod( " + unicode(path) + " , " + unicode(mode) + " , " + unicode(dev) + " )")
-        raise FuseOSError(EROFS)
-
-    def rmdir(self, path):
-        logger.debug("rmdir( " + unicode(path) + " )")
-        raise FuseOSError(EROFS)
-
-    def mkdir(self, path, mode):
-        logger.debug("mkdir( " + unicode(path) + " , " + unicode(mode) + " )")
-        raise FuseOSError(EROFS)
 
     def statfs(self, path):
         logger.debug("statfs( " + unicode(path) + " )")
@@ -298,25 +329,6 @@ class vbrConvert(Operations):
             'f_blocks', 'f_bsize', 'f_favail', 'f_ffree', 'f_files', 'f_flag',
             'f_frsize', 'f_namemax'))
 
-    def unlink(self, path):
-        logger.debug("unlink( " + unicode(path) + " )")
-        raise FuseOSError(EROFS)
-
-    def symlink(self, target, name):
-        logger.debug("symlink( " + unicode(target) + " , " + unicode(name) + " )")
-        raise FuseOSError(EROFS)
-
-    def rename(self, old, new):
-        logger.debug("rename( " + unicode(old) + " , " + unicode(new) + " )")
-        raise FuseOSError(EROFS)
-
-    def link(self, target, name):
-        logger.debug("link( " + unicode(target) + " , " + unicode(name) + " )")
-        raise FuseOSError(EROFS)
-
-    def utimens(self, path, times=None):
-        logger.debug("utimens( " + unicode(path) + " , " + unicode(times) + " )")
-        raise FuseOSError(EROFS)
 
     # File methods
     # ============
@@ -324,55 +336,41 @@ class vbrConvert(Operations):
     def open(self, path, flags):
         logger.debug("open( " + unicode(path) + " , " + unicode(flags) + " )")
 
-        if flags == 34817:
-            raise FuseOSError(EROFS)
-
         # Convert the file
         self.convFile(path)
 
         full_path = self._absolutePath(path)
         return os.open(full_path, flags)
 
-    def create(self, path, mode, fi=None):
-        logger.debug("create( " + unicode(path) + " , " + unicode(mode) + " , " + unicode(fi) + " )")
-        raise FuseOSError(EROFS)
-
     def read(self, path, length, offset, fh):
         logger.debug("read( " + unicode(path) + " , " + unicode(length) + " , " + unicode(offset) + " , " + unicode(fh) + " )")
 
-        # Find out what to attach them to
-        if path in self.known_files:
 
-            return self.known_files[path].read(offset,length)
-        else:
+        # Get the conv_obj to read the result from
+        with self.slock:
+            conv_obj = self.known_files.get(path,None)
+        # Read an actual file off of disk
+        if conv_obj is None:
             os.lseek(fh, offset, os.SEEK_SET)
             return os.read(fh, length)
-
-    def write(self, path, buf, offset, fh):
-        logger.debug("write( " + unicode(path) + " , [BUFF] , " + unicode(offset) + " , " + unicode(fh) + " )")
-        raise FuseOSError(EROFS)
-
-    def truncate(self, path, length, fh=None):
-        logger.debug("truncate( " + unicode(path) + " , " + unicode(length) + " , " + unicode(fh) + " )")
-        raise FuseOSError(EROFS)
+        else:
+            return conv_obj.read(offset,length)
 
     def flush(self, path, fh):
         logger.debug("flush( " + unicode(path) + " , " + unicode(fh) + " )")
-        raise FuseOSError(EROFS)
+        return 0
 
     def release(self, path, fh):
         logger.debug("release( " + unicode(path) + " , " + unicode(fh) + " )")
 
         # Remove the transcode on file close if they specified the read once argument
-        if options.cachetime == 0:
-            with self.slock:
-                if path in self.known_files:
-                    with self.known_files[path].lock:
-                        self.known_files[path].status = -1
+        if not options.keep_on_release:
 
-    def fsync(self, path, fdatasync, fh):
-        logger.debug("fsync( " + unicode(path) + " , " + unicode(fdatasync) + " , " + unicode(fh) + " )")
-        raise FuseOSError(EROFS)
+            with self.slock:
+                conv_obj = self.known_files.get(path,None)
+            if conv_obj is not None:
+                with conv_obj.lock:
+                    conv_obj.status = -1
 
 
 if __name__ == '__main__':
@@ -391,8 +389,9 @@ if __name__ == '__main__':
 
     # Specify the common arguments
     basic.add_option("--v","--V", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
-    basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work well on low power machines. Implies --noprefetch, --threads 1, and --cachetime 0.")
-    basic.add_option("--background", action="store_false", dest="foreground", default=True, help="Run this command in the background. (Currently broken.)")
+    basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
+    advanced.add_option("--multiread", action="store_true", dest="keep_on_release", default=False, help="Keep a transcode in memory after it has been read. (Until the cache timeout.) Useful if you will read the same file multiple times in succession.")
+    advanced.add_option("--foreground", action="store_true", dest="foreground", default=False, help="Run this command in the foreground.")
     advanced.add_option("--noprefetch", action="store_false", dest="prefetch", default=True, help="Disable auto-transcoding of files that we expect to be read soon.")
     advanced.add_option("--threads", action="store", dest="threads", default=cpu_count(), type="int", help="How many threads should we use? This should probably be set to the number of cores you have available. Default: %default")
     advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded MP3s in RAM after they are last touched? 0 removes them as soon as the file descriptor is released.")
@@ -404,21 +403,25 @@ if __name__ == '__main__':
     (options, args) = parser.parse_args()
 
     # Set up the logger
-    handler = logging.FileHandler(options.logfile, "w", encoding = "UTF-8")
+    handler = None
+    if options.logfile == "-":
+        handler = logging.StreamHandler(sys.stdout)
+    else:
+        handler = logging.FileHandler(options.logfile, "w", encoding = "UTF-8")
     formatter = logging.Formatter("%(levelname)s: %(message)s")
     handler.setFormatter(formatter)
     logger = logging.getLogger()
     logger.addHandler(handler)
-    if options.debug or options.logfile != "/tmp/vbrfs.log":
+    logger.setLevel(logging.INFO)
+    if options.debug:
         logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
 
     # Set up the minimal options
     if options.minimal:
         options.prefetch = False
         options.threads = 1
-        options.cachetime = 0
+        options.cachetime = 30
+        options.keep_on_release = False
 
     # Check for invalid command line options
     if len(args) < 2:
@@ -428,14 +431,25 @@ if __name__ == '__main__':
         print "Did you accidentally leave out an option? I don't accept three arguments."
         sys.exit(0)
 
-    # Make the magic happen
-    vbr = vbrConvert(args[0])
-    FUSE(vbr, args[1], foreground=options.foreground)
+    def start():
+        # Make the magic happen
+        vbr = vbrConvert(args[0])
+        # Trying to run in the background with the fuse module is broken and I don't know why so we fork-exec instead
+        FUSE(vbr, args[1], foreground=True)
 
-    # Tell any encoding processes to quit
-    with vbr.slock:
-        for key in vbr.known_files:
-            with vbr.known_files[key].lock:
-                vbr.known_files[key].status = -1
+        # Tell any encoding processes to quit
+        with vbr.slock:
+            for key in vbr.known_files:
+                with vbr.known_files[key].lock:
+                    vbr.known_files[key].status = -1
 
+        sys.exit(0)
+
+    # Run in the foreground
+    if options.foreground:
+        start()
+
+    # Run in the background
+    if os.fork() == 0:
+        start()
     sys.exit(0)
