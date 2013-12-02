@@ -280,24 +280,25 @@ class vbrConvert(Operations):
                      'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
         # This makes all files appear to have read-only permissions
-        readonly = """
-        # We want to show all files as read-only only
-        res['st_mode'] =  stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
-        # Add the right attributes
-        if os.path.islink(full_path):
-            res['st_mode'] = res['st_mode'] | stat.S_IFLNK
-        elif os.path.isfile(full_path):
-            res['st_mode'] = res['st_mode'] | stat.S_IFREG
-        elif os.path.isdir(full_path):
-            res['st_mode'] = res['st_mode'] | stat.S_IFDIR
-        else:
-            raise OSError(2,"No such file or directory.")
-        """
+        if options.modperms:
+            # We want to show all files as read-only only
+            res['st_mode'] =  stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH | stat.S_IWUSR
+            # Add the right attributes
+            if os.path.islink(full_path):
+                res['st_mode'] = res['st_mode'] | stat.S_IFLNK
+            elif os.path.isfile(full_path):
+                res['st_mode'] = res['st_mode'] | stat.S_IFREG
+            elif os.path.isdir(full_path):
+                res['st_mode'] = res['st_mode'] | stat.S_IFDIR | stat.S_IXUSR
+            else:
+                raise OSError(2,"No such file or directory.")
 
         # Update the size if we have a mp3 version of the file
-        if path in self.known_files:
-            with self.known_files[path].lock:
-                res['st_size'] = self.known_files[path].size
+        with self.slock:
+            known = self.known_files
+        if path in known:
+            with known[path].lock:
+                res['st_size'] = known[path].size
 
         # Return the results
         return res
@@ -377,7 +378,7 @@ if __name__ == '__main__':
 
     # Specify some basic information about our command
     usage = "usage: %prog [options] flacdir mp3dir"
-    parser = optparse.OptionParser(usage=usage,version="%prog .1",description="This program will present all FLACS as VBR mp3s. Like mp3fs but with VBR. It will add basic idv2 tags but it will not transfer all tags.")
+    parser = optparse.OptionParser(usage=usage,version="%prog 1",description="This program will present all FLACS as VBR mp3s. Like mp3fs but with VBR. It will add basic idv2 tags but it will not transfer all tags.")
 
     # Set up the option groups
     basic = optparse.OptionGroup(parser,"Basic options","If the default isn't good enough for you.")
@@ -395,8 +396,9 @@ if __name__ == '__main__':
     advanced.add_option("--noprefetch", action="store_false", dest="prefetch", default=True, help="Disable auto-transcoding of files that we expect to be read soon.")
     advanced.add_option("--threads", action="store", dest="threads", default=cpu_count(), type="int", help="How many threads should we use? This should probably be set to the number of cores you have available. Default: %default")
     advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded MP3s in RAM after they are last touched? 0 removes them as soon as the file descriptor is released.")
+    advanced.add_option("--normalize-perms", action="store_true", dest="modperms", default=False, help="Should we present all files and folders as read only?")
     devel.add_option("--always-conv", action="store_true", dest="attrbconv", default=False, help="Will convert flac->mp3 even for things like 'ls'. Only needed if you want 'ls' to show the right file size, but doing so will be very slow. (You are forcing vbrfs to transcode a directory just to 'ls'.)")
-    devel.add_option("--debug", action="store_true", dest="debug", default=False, help="Print every action sent to the filesystem to stdout. Implies --foreground.")
+    devel.add_option("--debug", action="store_true", dest="debug", default=False, help="Log every action sent to the filesystem.")
     devel.add_option("--log-file", action="store", dest="logfile", default="/tmp/vbrfs.log", help="The file to log to.")
 
     # Options, parse 'em
