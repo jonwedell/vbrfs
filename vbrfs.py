@@ -45,7 +45,12 @@ class backgroundTask():
 
             if job is not None:
                 logger.debug("encoding( " + unicode(job.path) + " )")
-                job.encode()
+                size = job.encode()
+                if size is not None:
+                    with self.host.sizelock:
+                        with job.lock:
+                            self.host.file_sizes[job.path] = size
+                            logger.debug("sized( " + unicode(job.path) + " , " + unicode(self.host.file_sizes[job.path]) + " )")
             else:
                 time.sleep(.1)
 
@@ -130,10 +135,10 @@ class conversionObj():
             with self.lock:
 
                 # If we aren't needed anymore just quit
-                if self.status == -1:
-                    lame.terminate()
-                    flac.terminate()
-                    return
+                #if self.status == -1:
+                #    lame.terminate()
+                #    flac.terminate()
+                #    return
 
                 # Add the next part of the transcode onto our buffer
                 self.data.seek(0,2)
@@ -148,6 +153,8 @@ class conversionObj():
         flac.wait()
         lame.wait()
 
+        # Return our encoded size
+        return self.size
 
     def read(self,offset,length):
         """ Read data from the file. Will return as soon as enough of the file is transcoded to meet the request."""
@@ -181,6 +188,10 @@ class vbrConvert(Operations):
         self.slock = threading.Lock()
         self.known_files = {}
         self.process_list = []
+
+        # Keep track of converted file sizes forever and ever
+        self.file_sizes = {}
+        self.sizelock = threading.Lock()
 
         # Multi-thread our work
         self.workers = []
@@ -219,6 +230,10 @@ class vbrConvert(Operations):
 
         # Don't do anything with existing files
         if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
+            # But do store their size
+            with self.sizelock:
+                self.file_sizes[self._absolutePath(path)] = os.path.getsize(self._absolutePath(path))
+                logger.debug("sized( " + unicode(self._absolutePath(path)) + " , " + unicode(self.file_sizes[self._absolutePath(path)]) + " )")
             return
 
         # Get the actual path
@@ -259,19 +274,23 @@ class vbrConvert(Operations):
 
         # Make sure they can't grab the actual FLACs
         if path[-5:] == ".flac" or path[-5:] == ".FLAC":
-            raise OSError(2,"No such file or directory.")
+            path = path.replace(".flac",".mp3").replace(".FLAC",".MP3")
+            # TODO: This is risky
+            #raise OSError(2,"No such file or directory.")
 
         full_path = self._absolutePath(path)
 
+        # Check if we already know the file size
+        with self.sizelock:
+            size = self.file_sizes.get(self._absolutePath(path),False)
+
         # Only convert files for getattr requests if option enabled
-        if options.attrbconv:
-            conv_obj = self.convFile(path)
-            if conv_obj is not None:
-                ready = False
-                while ready is False:
-                    with conv_obj.lock:
-                        if conv_obj.status == 2:
-                            ready = True
+        if options.attrbconv and size is False and not os.path.islink(path):
+            self.convFile(path)
+            while size is False:
+                with self.sizelock:
+                    size = self.file_sizes.get(self._absolutePath(path),False)
+                if size is False:
                     time.sleep(.1)
 
         # Stat the file
@@ -294,11 +313,8 @@ class vbrConvert(Operations):
                 raise OSError(2,"No such file or directory.")
 
         # Update the size if we have a mp3 version of the file
-        with self.slock:
-            known = self.known_files
-        if path in known:
-            with known[path].lock:
-                res['st_size'] = known[path].size
+        if size is not False and not os.path.islink(full_path):
+            res['st_size'] = size
 
         # Return the results
         return res
@@ -315,7 +331,12 @@ class vbrConvert(Operations):
 
     def readlink(self, path):
         logger.debug("readlink( " + unicode(path) + " )")
-        pathname = os.readlink(self._full_path(path))
+
+        path = self._absolutePath(path)
+        pathname = os.readlink(path)
+        #pathname = self._absolutePath(pathname)
+        # TODO: needs more work
+
         if pathname.startswith("/"):
             # Path name is absolute, sanitize it.
             return os.path.relpath(pathname, self.root)
@@ -341,7 +362,12 @@ class vbrConvert(Operations):
         self.convFile(path)
 
         full_path = self._absolutePath(path)
-        return os.open(full_path, flags)
+
+        # Always return made up fd for our transcodes
+        if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
+            return os.open(full_path, flags)
+        else:
+            return 1
 
     def read(self, path, length, offset, fh):
         logger.debug("read( " + unicode(path) + " , " + unicode(length) + " , " + unicode(offset) + " , " + unicode(fh) + " )")
@@ -373,6 +399,10 @@ class vbrConvert(Operations):
                 with conv_obj.lock:
                     conv_obj.status = -1
 
+        # Only close the file if it is a real file
+        if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
+            os.close(fh)
+
 
 if __name__ == '__main__':
 
@@ -389,7 +419,7 @@ if __name__ == '__main__':
     parser.add_option_group(devel)
 
     # Specify the common arguments
-    basic.add_option("--v","--V", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
+    basic.add_option("-v","--V", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
     basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
     advanced.add_option("--multiread", action="store_true", dest="keep_on_release", default=False, help="Keep a transcode in memory after it has been read. (Until the cache timeout.) Useful if you will read the same file multiple times in succession.")
     advanced.add_option("--foreground", action="store_true", dest="foreground", default=False, help="Run this command in the foreground.")
