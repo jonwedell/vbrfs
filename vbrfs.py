@@ -119,8 +119,9 @@ class conversionObj():
         tags = {}
         for sp in map(lambda x:x.partition("="), tag_cmd.stdout.read().split("\n")):
             if sp[0]:
-                tags[sp[0]] = sp[2]
+                tags[sp[0].lower()] = sp[2]
         tag_cmd.wait()
+        logger.debug("Got tags: " + str(tags))
 
         # Then get the decoded FLAC stream
         flac = subprocess.Popen(['flac', '-c', '-d', self.path],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -470,22 +471,20 @@ if __name__ == '__main__':
         sys.exit(4)
 
     # Test that FLAC and LAME commands are installed.
-    try:
-        test_cmd = subprocess.Popen(['metaflac', '--version'],stdout=subprocess.PIPE)
-        test_cmd.wait()
-        logger.info("Detected metaflac executable. Version: %s" % test_cmd.stdout.read().rstrip())
-    except OSError:
-        print "You don't seem to have metaflac installed. You must install the flac package.\nDebian derived distro: sudo apt-get install flac\nRedhat derived distro: sudo yum install flac"
-        sys.exit(5)
+    def checkCommand(cmd_name, pkg_name=None):
+        if pkg_name is None:
+            pkg_name = cmd_name
+        try:
+            test_cmd = subprocess.Popen([cmd_name, '--version'],stdout=subprocess.PIPE)
+            test_cmd.wait()
+            logger.debug("Detected %s executable. Version: %s" % (cmd_name,test_cmd.stdout.readline().rstrip()))
+        except OSError:
+            print "You don't seem to have %s installed. You must install the %s package.\nDebian derived distro: sudo apt-get install %s\nRedhat derived distro: sudo yum install %s" % (cmd_name,pkg_name,pkg_name,pkg_name)
+            sys.exit(5)
 
-    # Test that FLAC and LAME commands are installed.
-    try:
-        test_cmd = subprocess.Popen(['lame', '--version'],stdout=subprocess.PIPE)
-        test_cmd.wait()
-        logger.info("Detected lame executable. Version: %s" % test_cmd.stdout.readline().rstrip())
-    except OSError:
-        print "You don't seem to have lame installed. You must install the lame package.\nDebian derived distro: sudo apt-get install lame\nRedhat derived distro: sudo yum install lame"
-        sys.exit(6)
+    checkCommand("flac")
+    checkCommand("metaflac","flac")
+    checkCommand("lame")
 
     def start():
         # Make the magic happen
