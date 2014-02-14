@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import stat
+import math
 import errno
 import logging
 import StringIO
@@ -277,9 +278,7 @@ class vbrConvert(Operations):
 
         # Make sure they can't grab the actual FLACs
         if path[-5:] == ".flac" or path[-5:] == ".FLAC":
-            path = path.replace(".flac",".mp3").replace(".FLAC",".MP3")
-            # TODO: This is risky
-            #raise OSError(2,"No such file or directory.")
+            raise OSError(2,"No such file or directory.")
 
         full_path = self._absolutePath(path)
 
@@ -299,7 +298,7 @@ class vbrConvert(Operations):
         # Stat the file
         st = os.lstat(full_path)
         res =  dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid', 'st_blocks', 'st_blksize'))
 
         # This makes all files appear to have read-only permissions
         if options.modperms:
@@ -318,6 +317,14 @@ class vbrConvert(Operations):
         # Update the size if we have a mp3 version of the file
         if size is not False and not os.path.islink(full_path):
             res['st_size'] = size
+
+        # Estimate the size if we don't actually know
+        if size is False and not os.path.exists(self._absolutePath(path).replace(".flac",".mp3").replace(".FLAC",".MP3")):
+            res['st_size'] = int((res['st_size'] / 2.5))
+
+        # Update the number of blocks and the ideal block size
+        res['st_blocks'] = int(math.ceil(res['st_size'] / 512))
+        res['st_blksize'] = 32
 
         # Return the results
         return res
