@@ -458,19 +458,25 @@ if __name__ == '__main__':
         options.cachetime = 30
         options.keep_on_release = False
 
-    # Check for invalid command line options
+    # Check that the specified enough/the right arguments and that the mount point is up to spec
     if len(args) < 2:
-        print "You must specify the flac directory and the mp3 directory."
+        print "Error: You must specify the FLAC directory and the MP3 directory."
         sys.exit(1)
     if len(args) > 2:
-        print "Did you accidentally leave out an option? I don't accept three arguments."
+        print "Error: Did you accidentally leave out an option? I don't accept three arguments."
         sys.exit(2)
     if not os.path.isdir(args[0]):
-        print "The FLAC folder you specified (%s) doesn't exist." % args[0]
+        print "Error: The FLAC folder you specified (%s) doesn't exist." % os.path.abspath(args[0])
         sys.exit(3)
     if not os.path.isdir(args[1]):
-        print "The target mount point (%s) doesn't exist." % args[1]
+        print "Error: The target mount point (%s) doesn't exist." % os.path.abspath(args[1])
         sys.exit(4)
+    if os.path.ismount(args[1]):
+        print "Error: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1])
+        sys.exit(5)
+    if os.listdir(args[1]):
+        print "Error: The target mount point (%s) is not empty." % os.path.abspath(args[1])
+        sys.exit(6)
 
     # Test that FLAC and LAME commands are installed.
     def checkCommand(cmd_name, pkg_name=None):
@@ -482,8 +488,9 @@ if __name__ == '__main__':
             logger.debug("Detected %s executable. Version: %s" % (cmd_name,test_cmd.stdout.readline().rstrip()))
         except OSError:
             print "You don't seem to have %s installed. You must install the %s package.\nDebian derived distro: sudo apt-get install %s\nRedhat derived distro: sudo yum install %s" % (cmd_name,pkg_name,pkg_name,pkg_name)
-            sys.exit(5)
+            sys.exit(7)
 
+    checkCommand("fusermount","fuse")
     checkCommand("flac")
     checkCommand("metaflac","flac")
     checkCommand("lame")
