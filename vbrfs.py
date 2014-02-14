@@ -458,10 +458,34 @@ if __name__ == '__main__':
     # Check for invalid command line options
     if len(args) < 2:
         print "You must specify the flac directory and the mp3 directory."
-        sys.exit(0)
+        sys.exit(1)
     if len(args) > 2:
         print "Did you accidentally leave out an option? I don't accept three arguments."
-        sys.exit(0)
+        sys.exit(2)
+    if not os.path.isdir(args[0]):
+        print "The FLAC folder you specified (%s) doesn't exist." % args[0]
+        sys.exit(3)
+    if not os.path.isdir(args[1]):
+        print "The target mount point (%s) doesn't exist." % args[1]
+        sys.exit(4)
+
+    # Test that FLAC and LAME commands are installed.
+    try:
+        test_cmd = subprocess.Popen(['metaflac', '--version'],stdout=subprocess.PIPE)
+        test_cmd.wait()
+        logger.info("Detected metaflac executable. Version: %s" % test_cmd.stdout.read().rstrip())
+    except OSError:
+        print "You don't seem to have metaflac installed. You must install the flac package.\nDebian derived distro: sudo apt-get install flac\nRedhat derived distro: sudo yum install flac"
+        sys.exit(5)
+
+    # Test that FLAC and LAME commands are installed.
+    try:
+        test_cmd = subprocess.Popen(['lame', '--version'],stdout=subprocess.PIPE)
+        test_cmd.wait()
+        logger.info("Detected lame executable. Version: %s" % test_cmd.stdout.readline().rstrip())
+    except OSError:
+        print "You don't seem to have lame installed. You must install the lame package.\nDebian derived distro: sudo apt-get install lame\nRedhat derived distro: sudo yum install lame"
+        sys.exit(6)
 
     def start():
         # Make the magic happen
