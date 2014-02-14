@@ -121,7 +121,6 @@ class conversionObj():
             if sp[0]:
                 tags[sp[0].lower()] = sp[2]
         tag_cmd.wait()
-        logger.debug("Got tags: " + str(tags))
 
         # Then get the decoded FLAC stream
         flac = subprocess.Popen(['flac', '-c', '-d', self.path],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -422,7 +421,7 @@ if __name__ == '__main__':
     # Specify the common arguments
     basic.add_option("-v","--V", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
     basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
-    advanced.add_option("--multiread", action="store_true", dest="keep_on_release", default=False, help="Keep a transcode in memory after it has been read. (Until the cache timeout.) Useful if you will read the same file multiple times in succession.")
+    advanced.add_option("--no-multiread", action="store_false", dest="keep_on_release", default=True, help="Free a transcode from RAM after it has been read. (Otherwise it will be held until the cache timeout.) Useful if you will only read each file once.")
     advanced.add_option("--foreground", action="store_true", dest="foreground", default=False, help="Run this command in the foreground.")
     advanced.add_option("--noprefetch", action="store_false", dest="prefetch", default=True, help="Disable auto-transcoding of files that we expect to be read soon.")
     advanced.add_option("--threads", action="store", dest="threads", default=cpu_count(), type="int", help="How many threads should we use? This should probably be set to the number of cores you have available. Default: %default")
