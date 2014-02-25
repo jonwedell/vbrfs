@@ -24,6 +24,7 @@ import stat
 import math
 import errno
 import logging
+import logging.handlers
 import StringIO
 import optparse
 import threading
@@ -438,18 +439,26 @@ if __name__ == '__main__':
     advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded MP3s in RAM after they are last touched? 0 removes them as soon as the file descriptor is released.")
     advanced.add_option("--normalize-perms", action="store_true", dest="modperms", default=False, help="Should we present all files and folders as read only?")
     devel.add_option("--always-conv", action="store_true", dest="attrbconv", default=False, help="Will convert flac->mp3 even for things like 'ls'. Only needed if you want 'ls' to show the right file size, but doing so will be very slow. (You are forcing vbrfs to transcode a directory just to 'ls'.)")
-    devel.add_option("--debug", action="store_true", dest="debug", default=False, help="Log every action sent to the filesystem.")
-    devel.add_option("--log-file", action="store", dest="logfile", default="/tmp/vbrfs.log", help="The file to log to.")
+    devel.add_option("--quiet", action="store_false", dest="debug", default=True, help="Only log critical events.")
+    devel.add_option("--log-file", action="store", dest="logfile", help="The file to log to.")
+    devel.add_option("--log-size", action="store", dest="logsize", default=4194304, type="int", help="How many bytes can the log grow to before being rotated?")
 
     # Options, parse 'em
     (options, args) = parser.parse_args()
 
     # Set up the logger
     handler = None
+    # Log to STDOUT by default in foreground mode or /tmp/vbrfs.log in background
+    if options.logfile is None:
+        if options.foreground:
+            options.logfile = "-"
+        else:
+            options.logfile = "/tmp/vbrfs.log"
+
     if options.logfile == "-":
         handler = logging.StreamHandler(sys.stdout)
     else:
-        handler = logging.FileHandler(options.logfile, "w", encoding = "UTF-8")
+        handler = logging.handlers.RotatingFileHandler(options.logfile, "a", encoding = "UTF-8", maxBytes=options.logsize)
     formatter = logging.Formatter("%(levelname)s: %(message)s")
     handler.setFormatter(formatter)
     logger = logging.getLogger()
@@ -475,15 +484,19 @@ if __name__ == '__main__':
     if not os.path.isdir(args[0]):
         print "Error: The FLAC folder you specified (%s) doesn't exist." % os.path.abspath(args[0])
         sys.exit(3)
-    if not os.path.isdir(args[1]):
+    if not os.path.exists(args[1]):
         print "Error: The target mount point (%s) doesn't exist." % os.path.abspath(args[1])
         sys.exit(4)
+    if not os.path.isdir(args[1]):
+        print "Error: The target mount point (%s) exists but isn't a directory." % os.path.abspath(args[1])
+        sys.exit(5)
     if os.path.ismount(args[1]):
         print "Error: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1])
-        sys.exit(5)
+        sys.exit(6)
     if os.listdir(args[1]):
         print "Error: The target mount point (%s) is not empty." % os.path.abspath(args[1])
-        sys.exit(6)
+        sys.exit(7)
+
 
     # Test that FLAC and LAME commands are installed.
     def checkCommand(cmd_name, pkg_name=None):
@@ -505,8 +518,15 @@ if __name__ == '__main__':
     def start():
         # Make the magic happen
         vbr = vbrConvert(args[0])
+
         # Trying to run in the background with the fuse module is broken and I don't know why so we fork-exec instead
-        FUSE(vbr, args[1], foreground=True)
+        try:
+            FUSE(vbr, args[1], foreground=True)
+        except RuntimeError as e:
+            logger.critical("We encountered a runtime error when attempting to run FUSE.")
+            if not options.foreground:
+                print "Something is wrong with the location you are attempting to mount onto."
+            sys.exit(8)
 
         # Tell any encoding processes to quit
         with vbr.slock:
