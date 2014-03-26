@@ -86,7 +86,12 @@ class backgroundTask():
                             to_remove.append(key)
                         # Object passed timeout
                         if conv_obj.status == 2 and conv_obj.last_read + options.cachetime < now:
-                            to_remove.append(key)
+
+                            if conv_obj.opens > 0:
+                                logger.debug("Cache expired on (%s) but keeping because file is still open.", conv_obj.path)
+                                conv_obj.last_read = now
+                            else:
+                                to_remove.append(key)
 
                 # Remove the deleted conv_objects from the file hash
                 with self.host.slock:
@@ -102,6 +107,7 @@ class conversionObj():
         self.last_read = time.time()
         self.lock = threading.Lock()
         self.status = 0
+        self.opens = 0
 
         # Transcoded info
         self.encoded = 0
@@ -231,7 +237,7 @@ class vbrConvert(Operations):
 
         with self.slock:
             if path in self.known_files:
-                return
+                return self.known_files[path]
 
         # Don't do anything with existing files
         if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
@@ -370,7 +376,12 @@ class vbrConvert(Operations):
         logger.debug("open( " + unicode(path) + " , " + unicode(flags) + " )")
 
         # Convert the file
-        self.convFile(path)
+        conv_obj = self.convFile(path)
+
+        # Increment the "locks" on the file
+        if conv_obj is not None:
+            with conv_obj.lock:
+                conv_obj.opens += 1
 
         full_path = self._absolutePath(path)
 
@@ -401,19 +412,25 @@ class vbrConvert(Operations):
     def release(self, path, fh):
         logger.debug("release( " + unicode(path) + " , " + unicode(fh) + " )")
 
-        # Remove the transcode on file close if they specified the read once argument
-        if not options.keep_on_release:
-
-            with self.slock:
-                conv_obj = self.known_files.get(path,None)
-            if conv_obj is not None:
-                with conv_obj.lock:
-                    conv_obj.status = -1
-
-        # Only close the file if it is a real file
+        # If it is a real file, just close it and move on
         if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
             os.close(fh)
+            return
 
+        # It is a transcode file. Decrease the locks on it first.
+        with self.slock:
+            conv_obj = self.known_files.get(path,None)
+        if conv_obj is not None:
+            with conv_obj.lock:
+                conv_obj.opens -= 1
+
+        # Remove the transcode on file close if they specified the read once argument
+        if not options.keep_on_release:
+            if conv_obj is not None:
+                with conv_obj.lock:
+                    # Only release if this file has been released the same number of times that is has been opened
+                    if conv_obj.opens == 0:
+                        conv_obj.status = -1
 
 if __name__ == '__main__':
 
@@ -458,7 +475,7 @@ if __name__ == '__main__':
     if options.logfile == "-":
         handler = logging.StreamHandler(sys.stdout)
     else:
-        handler = logging.handlers.RotatingFileHandler(options.logfile, "a", encoding = "UTF-8", maxBytes=options.logsize)
+        handler = logging.handlers.RotatingFileHandler(options.logfile, "w", encoding = "UTF-8", maxBytes=options.logsize)
     formatter = logging.Formatter("%(levelname)s: %(message)s")
     handler.setFormatter(formatter)
     logger = logging.getLogger()
