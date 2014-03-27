@@ -428,9 +428,18 @@ class vbrConvert(Operations):
         if not options.keep_on_release:
             if conv_obj is not None:
                 with conv_obj.lock:
+<<<<<<< HEAD
                     # Only release if this file has been released the same number of times that is has been opened
                     if conv_obj.opens == 0:
                         conv_obj.status = -1
+=======
+                    conv_obj.status = -1
+
+        # Only close the file if it is a real file
+        if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
+            os.close(fh)
+
+>>>>>>> af9382b606403941bdd27c21ab87fc07fb080bb9
 
 if __name__ == '__main__':
 
@@ -501,6 +510,7 @@ if __name__ == '__main__':
     if not os.path.isdir(args[0]):
         print "Error: The FLAC folder you specified (%s) doesn't exist." % os.path.abspath(args[0])
         sys.exit(3)
+<<<<<<< HEAD
     if not os.path.exists(args[1]):
         print "Error: The target mount point (%s) doesn't exist." % os.path.abspath(args[1])
         sys.exit(4)
@@ -514,6 +524,17 @@ if __name__ == '__main__':
         print "Error: The target mount point (%s) is not empty." % os.path.abspath(args[1])
         sys.exit(7)
 
+=======
+    if not os.path.isdir(args[1]):
+        print "Error: The target mount point (%s) doesn't exist." % os.path.abspath(args[1])
+        sys.exit(4)
+    if os.path.ismount(args[1]):
+        print "Error: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1])
+        sys.exit(5)
+    if os.listdir(args[1]):
+        print "Error: The target mount point (%s) is not empty." % os.path.abspath(args[1])
+        sys.exit(6)
+>>>>>>> af9382b606403941bdd27c21ab87fc07fb080bb9
 
     # Test that FLAC and LAME commands are installed.
     def checkCommand(cmd_name, pkg_name=None):
