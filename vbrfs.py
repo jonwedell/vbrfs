@@ -108,6 +108,7 @@ class conversionObj():
         self.lock = threading.Lock()
         self.status = 0
         self.opens = 0
+        self.init_time = time.time()
 
         # Transcoded info
         self.encoded = 0
@@ -125,13 +126,26 @@ class conversionObj():
                 return
             self.status == 1
 
+        # Need to check these cases eventually, but as the commented out portion stands it causes the whole getup to error out
         # First get the tags
-        tag_cmd = subprocess.Popen(['metaflac', '--export-tags-to', '-', self.path],stdout=subprocess.PIPE)
+        #if not os.access(self.path, os.F_OK):
+            #raise OSError(2,"No such file or directory.")
+        #if not os.access(self.path,os.R_OK):
+            #raise OSError(2,"No read permissions on the file %s." % self.path)
+
+        tag_cmd = subprocess.Popen(['metaflac', '--show-total-samples', '--show-sample-rate', '--export-tags-to', '-', self.path],stdout=subprocess.PIPE)
         tags = {}
+
+        # Get the track duration from the sample information
+        tags['duration'] = float(tag_cmd.stdout.readline()) / float(tag_cmd.stdout.readline())
+
         for sp in map(lambda x:x.partition("="), tag_cmd.stdout.read().split("\n")):
             if sp[0]:
                 tags[sp[0].lower()] = sp[2]
         tag_cmd.wait()
+
+        with self.lock:
+            self.tags = tags
 
         # Then get the decoded FLAC stream
         flac = subprocess.Popen(['flac', '-c', '-d', self.path],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -363,7 +377,7 @@ class vbrConvert(Operations):
     def statfs(self, path):
         logger.debug("statfs( " + unicode(path) + " )")
         full_path = self._full_path(path)
-	stv = os.statvfs(full_path)
+        stv = os.statvfs(full_path)
 
         return dict((key, getattr(stv, key)) for key in ('f_bavail', 'f_bfree',
             'f_blocks', 'f_bsize', 'f_favail', 'f_ffree', 'f_files', 'f_flag',
@@ -416,6 +430,21 @@ class vbrConvert(Operations):
         # If it is a real file, just close it and move on
         if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
             os.close(fh)
+
+            # TODO: This unfortunately can't be here. I think I need to make non-transcode files objects as well....
+            future_code = """
+            # We would scrobble the song here, if we knew how long it was open
+            tag_cmd = subprocess.Popen(['id3v2', '-R', self._full_path(path)],stdout=subprocess.PIPE)
+            tags = {}
+            tag_map = {"TRCK":"tracknumber", "TIT2": "title", "TPE2": "artist", "TALB": "album"}
+
+            for sp in map(lambda x:x.partition(":"), tag_cmd.stdout.read().split("\n")):
+                if sp[0]:
+                    if tag_map.get(sp[0].upper(),None):
+                        tags[tag_map[sp[0].upper()]] = sp[2]
+            tag_cmd.wait()
+            """
+
             return
 
         # It is a transcode file. Decrease the locks on it first.
@@ -425,13 +454,23 @@ class vbrConvert(Operations):
             with conv_obj.lock:
                 conv_obj.opens -= 1
 
-        # Remove the transcode on file close if they specified the read once argument
-        if not options.keep_on_release:
-            if conv_obj is not None:
-                with conv_obj.lock:
-                    # Only release if this file has been released the same number of times that is has been opened
-                    if conv_obj.opens == 0:
+                # They have close the file for the "last" time
+                if conv_obj.opens == 0:
+
+                    # Remove the transcode on file close if they specified the read once argument
+                    if not options.keep_on_release:
                         conv_obj.status = -1
+
+                    # Scrobble to last.fm
+                    if options.lastfm and hasattr(conv_obj,"tags"):
+                        play_time = time.time() - conv_obj.init_time
+                        if play_time > conv_obj.tags['duration']/2 and play_time > 30:
+
+                            response = lastfm.scrobble(conv_obj.tags,conv_obj.init_time)
+                            if response[0] != 200:
+                                logger.warn("Scrobble error with code %d: %s" % (response[0],response[1]))
+                            else:
+                                logger.debug("Successfully scrobbled '%s' by '%s'." % (conv_obj.tags.get("title","?"),conv_obj.tags.get("artist","?")))
 
         # Only close the file if it is a real file
         if os.path.isfile(self._full_path(path)) or os.path.isdir(self._full_path(path)):
@@ -454,6 +493,7 @@ if __name__ == '__main__':
     # Specify the common arguments
     basic.add_option("-v","--V", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
     basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
+    basic.add_option("--lastfm", action="store_true", dest="lastfm", default=False, help="Scrobble plays to last.fm. Will require a brief authorization step the first time it is used.")
     advanced.add_option("--no-multiread", action="store_false", dest="keep_on_release", default=True, help="Free a transcode from RAM after it has been read. (Otherwise it will be held until the cache timeout.) Useful if you will only read each file once.")
     advanced.add_option("--foreground", action="store_true", dest="foreground", default=False, help="Run this command in the foreground.")
     advanced.add_option("--noprefetch", action="store_false", dest="prefetch", default=True, help="Disable auto-transcoding of files that we expect to be read soon.")
@@ -481,7 +521,8 @@ if __name__ == '__main__':
         handler = logging.StreamHandler(sys.stdout)
     else:
         handler = logging.handlers.RotatingFileHandler(options.logfile, "w", encoding = "UTF-8", maxBytes=options.logsize)
-    formatter = logging.Formatter("%(levelname)s: %(message)s")
+    formatter = logging.Formatter("%(asctime)s:%(module)s_%(lineno)d:%(levelname)s: %(message)s")
+
     handler.setFormatter(formatter)
     logger = logging.getLogger()
     logger.addHandler(handler)
@@ -499,33 +540,43 @@ if __name__ == '__main__':
     # Check that the specified enough/the right arguments and that the mount point is up to spec
     if len(args) < 2:
         print "Error: You must specify the FLAC directory and the MP3 directory."
+        logger.critical("Could not run: You must specify the FLAC directory and the MP3 directory.")
         sys.exit(1)
     if len(args) > 2:
         print "Error: Did you accidentally leave out an option? I don't accept three arguments."
+        logger.critical("Could not run: Did you accidentally leave out an option? I don't accept three arguments.")
         sys.exit(2)
     if not os.path.isdir(args[0]):
         print "Error: The FLAC folder you specified (%s) doesn't exist." % os.path.abspath(args[0])
+        logger.critical("Could not run: The FLAC folder you specified (%s) doesn't exist." % os.path.abspath(args[0]))
         sys.exit(3)
     if not os.path.exists(args[1]):
         print "Error: The target mount point (%s) doesn't exist." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) doesn't exist." % os.path.abspath(args[1]))
         sys.exit(4)
     if not os.path.isdir(args[1]):
         print "Error: The target mount point (%s) exists but isn't a directory." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) exists but isn't a directory." % os.path.abspath(args[1]))
         sys.exit(5)
     if os.path.ismount(args[1]):
         print "Error: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1]))
         sys.exit(6)
     if os.listdir(args[1]):
         print "Error: The target mount point (%s) is not empty." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) is not empty." % os.path.abspath(args[1]))
         sys.exit(7)
     if not os.path.isdir(args[1]):
         print "Error: The target mount point (%s) doesn't exist." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) doesn't exist." % os.path.abspath(args[1]))
         sys.exit(4)
     if os.path.ismount(args[1]):
         print "Error: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) appears to already have something mounted there." % os.path.abspath(args[1]))
         sys.exit(5)
     if os.listdir(args[1]):
         print "Error: The target mount point (%s) is not empty." % os.path.abspath(args[1])
+        logger.critical("Could not run: The target mount point (%s) is not empty." % os.path.abspath(args[1]))
         sys.exit(6)
 
     # Test that FLAC and LAME commands are installed.
@@ -538,6 +589,7 @@ if __name__ == '__main__':
             logger.debug("Detected %s executable. Version: %s" % (cmd_name,test_cmd.stdout.readline().rstrip()))
         except OSError:
             print "You don't seem to have %s installed. You must install the %s package.\nDebian derived distro: sudo apt-get install %s\nRedhat derived distro: sudo yum install %s" % (cmd_name,pkg_name,pkg_name,pkg_name)
+            logger.critical("Could not run: Missing package: %s" % pkg_name)
             sys.exit(7)
 
     checkCommand("fusermount","fuse")
@@ -565,6 +617,15 @@ if __name__ == '__main__':
                     vbr.known_files[key].status = -1
 
         sys.exit(0)
+
+    # If they want to use last.fm, we need to initialize it prior to starting up the FS.
+    if options.lastfm or os.path.isfile(os.path.expanduser("~/.vbrfs_lastfm_key")):
+        try:
+            import lastfm
+        except ImportError:
+            print "You don't seem to have the python requests module installed. It is required to use last.fm scrobbling.\nPython direct install: sudo easy_install requests\nDebian derived distro: sudo apt-get install python-requests\n"
+            logger.critical("Could not run. Missing requests module and last.fm support enabled.")
+            sys.exit(9)
 
     # Run in the foreground
     if options.foreground:
