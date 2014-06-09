@@ -71,7 +71,7 @@ def scrobble(tags, init_time):
     # Scrobble
     try:
         r = requests.post(request_url, params=payload, timeout=request_timeout)
-    except Timeout:
+    except requests.Timeout:
         return (-1, "Timeout occured while attempting to connect to last.fm")
 
     # Process the request, look for errors
