@@ -516,7 +516,7 @@ if __name__ == '__main__':
     # Specify the common arguments
     basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
     basic.add_option("--lastfm", action="store_true", dest="lastfm", default=False, help="Scrobble plays to last.fm. Will require a brief authorization step the first time it is used.")
-    encoder_options.add_option("--format", action="store", dest="enc_format", type="choice", default="mp3", choices=("mp3","ogg"), help="What lossy format should we transcode into? Default: %default.")
+    encoder_options.add_option("--format", action="store", dest="enc_format", type="choice", default="mp3", choices=("mp3","ogg"), help="What lossy format should we transcode into? Choices: (ogg, mp3) Default: %default.")
     encoder_options.add_option("-v","--V", action="store", dest="v", type="choice", default="2", choices=(map(lambda x:str(x),range(0,10))), help="What v level mp3 do you want to transcode to? Default: %default.")
     encoder_options.add_option("-q","--Q", action="store", dest="q", type="choice", default="6", choices=(map(lambda x:str(x),range(0,10))), help="What q level Ogg vorbis do you want to transcode to? Default: %default.")
     advanced.add_option("--no-multiread", action="store_false", dest="keep_on_release", default=True, help="Free a transcode from RAM after it has been read. (Otherwise it will be held until the cache timeout.) Useful if you will only read each file once.")
