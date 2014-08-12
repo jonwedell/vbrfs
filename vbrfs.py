@@ -34,6 +34,21 @@ from errno import *
 from multiprocessing import cpu_count
 from fuse import FUSE, FuseOSError, Operations
 
+def _extensionConvert(the_path, mode="encode"):
+
+    if mode == "encode":
+        if options.enc_format == "mp3":
+            return the_path.replace('.flac','.mp3').replace('.FLAC','.MP3')
+        elif options.enc_format == "ogg":
+            return the_path.replace('.flac','.ogg').replace('.FLAC','.OGG')
+    elif mode == "decode":
+        if options.enc_format == "mp3":
+            return the_path.replace('.mp3','.flac').replace('.MP3','.FLAC')
+        elif options.enc_format == "ogg":
+            return the_path.replace('.ogg','.flac').replace('.OGG','.FLAC')
+    else:
+        raise ValueError("Invalid mode.")
+
 class backgroundTask():
 
     def __init__(self, host, expiration_checker=False):
@@ -149,9 +164,15 @@ class conversionObj():
 
         # Then get the decoded FLAC stream
         flac = subprocess.Popen(['flac', '-c', '-d', self.path],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # Then set up the lame arguments and call lame
-        lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?'), '-', '-']
-        lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
+
+        if options.enc_format == "mp3":
+            # Then set up the lame arguments and call lame
+            lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?'), '-', '-']
+            lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
+        elif options.enc_format == "ogg":
+            # Then set up the lame arguments and call ogg
+            lamecmd = ['oggenc', '-q', options.q, '--artist', tags.get('artist','?'), '--title', tags.get('title','?'), '--album', tags.get('album','?'), '--genre', tags.get('genre','?'), '--tracknum', tags.get('tracknumber','?'), '--date', tags.get('date','?'), '-']
+            lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
 
         # Read the transcoded data in 16kb chunks
         while True:
@@ -242,7 +263,7 @@ class vbrConvert(Operations):
         if os.path.isfile(self._full_path(partial)):
             return os.path.abspath(self._full_path(partial))
         else:
-            return os.path.abspath(self._full_path(partial)).replace('.mp3','.flac').replace('.MP3','.FLAC')
+            return _extensionConvert(os.path.abspath(self._full_path(partial)), mode="decode")
 
     def convFile(self, path, getnext=True):
         # We don't need to convert a given file twice
@@ -284,7 +305,7 @@ class vbrConvert(Operations):
             next_files = os.listdir(os.path.dirname(abspath))
             ind = next_files.index(os.path.basename(abspath)) + 1
             for x in range(ind,len(next_files)):
-                the_path = os.path.join(os.path.dirname(path),next_files[x]).replace('.flac','.mp3').replace('.FLAC','.MP3')
+                the_path = _extensionConvert(os.path.join(os.path.dirname(path),next_files[x]), mode="encode")
                 logger.debug("prefetch( " + unicode(the_path) + " )")
                 self.convFile(the_path,getnext=False)
 
@@ -340,7 +361,7 @@ class vbrConvert(Operations):
             res['st_size'] = size
 
         # Estimate the size if we don't actually know
-        if size is False and not os.path.exists(self._absolutePath(path).replace(".flac",".mp3").replace(".FLAC",".MP3")):
+        if size is False and not os.path.exists(_extensionConvert(self._absolutePath(path), mode="encode")):
             res['st_size'] = int((res['st_size'] / 2.5))
 
         # Update the number of blocks and the ideal block size
@@ -358,7 +379,7 @@ class vbrConvert(Operations):
         if os.path.isdir(full_path):
             dirents.extend(os.listdir(full_path))
         for r in dirents:
-            yield r.replace('.flac','.mp3').replace('.FLAC','.MP3')
+            yield _extensionConvert(r, mode="encode")
 
     def readlink(self, path):
         logger.debug("readlink( " + unicode(path) + " )")
@@ -479,28 +500,32 @@ class vbrConvert(Operations):
 if __name__ == '__main__':
 
     # Specify some basic information about our command
-    usage = "usage: %prog [options] flacdir mp3dir"
-    parser = optparse.OptionParser(usage=usage,version="%prog 1.0",description="This program will present all FLACS as VBR mp3s. Like mp3fs but with VBR. It will add basic idv2 tags but it will not transfer all tags.")
+    usage = "usage: %prog [options] flacdir vbrdir"
+    parser = optparse.OptionParser(usage=usage,version="%prog 1.0",description="This program will present all FLACS as VBR mp3s or oggs. Like mp3fs but with VBR. It will add basic idv2 tags but it will not transfer all tags.")
 
     # Set up the option groups
     basic = optparse.OptionGroup(parser,"Basic options","If the default isn't good enough for you.")
     parser.add_option_group(basic)
+    encoder_options = optparse.OptionGroup(parser,"Encoder options","Allows you to encode to Ogg rather than mp3, as well as specify encoding level.")
+    parser.add_option_group(encoder_options)
     advanced = optparse.OptionGroup(parser,"Advanced options","You may want to use some of these.")
     parser.add_option_group(advanced)
     devel = optparse.OptionGroup(parser,"Developer options","You really shouldn't use these unless you know what you are doing.")
     parser.add_option_group(devel)
 
     # Specify the common arguments
-    basic.add_option("-v","--V", action="store", dest="v", type="choice", default="0", choices=(map(lambda x:str(x),range(0,10))), help="What V level do you want to transcode to? Default: %default.")
     basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
     basic.add_option("--lastfm", action="store_true", dest="lastfm", default=False, help="Scrobble plays to last.fm. Will require a brief authorization step the first time it is used.")
+    encoder_options.add_option("--format", action="store", dest="enc_format", type="choice", default="mp3", choices=("mp3","ogg"), help="What lossy format should we transcode into? Default: %default.")
+    encoder_options.add_option("-v","--V", action="store", dest="v", type="choice", default="2", choices=(map(lambda x:str(x),range(0,10))), help="What v level mp3 do you want to transcode to? Default: %default.")
+    encoder_options.add_option("-q","--Q", action="store", dest="q", type="choice", default="6", choices=(map(lambda x:str(x),range(0,10))), help="What q level Ogg vorbis do you want to transcode to? Default: %default.")
     advanced.add_option("--no-multiread", action="store_false", dest="keep_on_release", default=True, help="Free a transcode from RAM after it has been read. (Otherwise it will be held until the cache timeout.) Useful if you will only read each file once.")
     advanced.add_option("--foreground", action="store_true", dest="foreground", default=False, help="Run this command in the foreground.")
     advanced.add_option("--noprefetch", action="store_false", dest="prefetch", default=True, help="Disable auto-transcoding of files that we expect to be read soon.")
     advanced.add_option("--threads", action="store", dest="threads", default=cpu_count(), type="int", help="How many threads should we use? This should probably be set to the number of cores you have available. Default: %default")
-    advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded MP3s in RAM after they are last touched? 0 removes them as soon as the file descriptor is released.")
+    advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded files in RAM after they are last touched? 0 removes them as soon as the file descriptor is released.")
     advanced.add_option("--normalize-perms", action="store_true", dest="modperms", default=False, help="Should we present all files and folders as read only?")
-    devel.add_option("--always-conv", action="store_true", dest="attrbconv", default=False, help="Will convert flac->mp3 even for things like 'ls'. Only needed if you want 'ls' to show the right file size, but doing so will be very slow. (You are forcing vbrfs to transcode a directory just to 'ls'.)")
+    devel.add_option("--always-conv", action="store_true", dest="attrbconv", default=False, help="Will convert flac->vbr format even for things like 'ls'. Only needed if you want 'ls' to show the right file size, but doing so will be very slow. (You are forcing vbrfs to transcode a directory just to 'ls'.)")
     devel.add_option("--quiet", action="store_false", dest="debug", default=True, help="Only log critical events.")
     devel.add_option("--log-file", action="store", dest="logfile", help="The file to log to.")
     devel.add_option("--log-size", action="store", dest="logsize", default=4194304, type="int", help="How many bytes can the log grow to before being rotated?")
@@ -539,8 +564,8 @@ if __name__ == '__main__':
 
     # Check that the specified enough/the right arguments and that the mount point is up to spec
     if len(args) < 2:
-        print "Error: You must specify the FLAC directory and the MP3 directory."
-        logger.critical("Could not run: You must specify the FLAC directory and the MP3 directory.")
+        print "Error: You must specify the FLAC source directory and the target directory."
+        logger.critical("Could not run: You must specify FLAC the source directory and the target directory.")
         sys.exit(1)
     if len(args) > 2:
         print "Error: Did you accidentally leave out an option? I don't accept three arguments."
@@ -596,6 +621,9 @@ if __name__ == '__main__':
     checkCommand("flac")
     checkCommand("metaflac","flac")
     checkCommand("lame")
+
+    if options.enc_format == "ogg":
+        checkCommand("oggenc","vorbis-tools")
 
     def start():
         # Make the magic happen

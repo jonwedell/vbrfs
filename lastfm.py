@@ -30,7 +30,7 @@ secret = 'a58577f64c88d9dab10ec8214e1bb36a'
 session_key = None
 
 # Configuration parameters
-request_timeout = 1
+request_timeout = 5
 request_url = "http://ws.audioscrobbler.com/2.0/"
 
 def add_secret(payload):
