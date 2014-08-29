@@ -165,9 +165,30 @@ class conversionObj():
         # Then get the decoded FLAC stream
         flac = subprocess.Popen(['flac', '-c', '-d', self.path],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+        # See if there is art - if so, embed the smallest file
+        if options.art:
+            files = os.listdir(os.path.dirname(self.path))
+
+            art_file, art_size = None, float("inf")
+            for afile in files:
+                afile = os.path.join(os.path.dirname(self.path), afile)
+                if afile.endswith("jpg") or afile.endswith("JPG") or afile.endswith("png") or afile.endswith("PNG") or afile.endswith("gif") or afile.endswith("GIF"):
+                    tmp_size = os.path.getsize(afile)
+                    if tmp_size < art_size and tmp_size != 0:
+                        art_file, art_size = afile, os.path.getsize(afile)
+
         if options.enc_format == "mp3":
             # Then set up the lame arguments and call lame
-            lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?'), '-', '-']
+            lamecmd = ['lame','-q0', '-V', options.v, '--vbr-new', '--ignore-tag-errors', '--add-id3v2', '--pad-id3v2', '--ignore-tag-errors', '--ta', tags.get('artist','?'), '--tt', tags.get('title','?'), '--tl', tags.get('album','?'), '--tg', tags.get('genre','?'), '--tn', tags.get('tracknumber','?'), '--ty', tags.get('date','?')]
+
+            # Add the album art
+            if options.art and art_file is not None:
+                lamecmd.extend(['--ti', art_file, '-', '-'])
+            else:
+                lamecmd.extend(['-', '-'])
+
+            logger.debug("Convert command: %s" % lamecmd)
+
             lame = subprocess.Popen(lamecmd,stdout=subprocess.PIPE,stdin=flac.stdout,stderr=subprocess.PIPE)
         elif options.enc_format == "ogg":
             # Then set up the lame arguments and call ogg
@@ -516,6 +537,7 @@ if __name__ == '__main__':
     # Specify the common arguments
     basic.add_option("--minimal", action="store_true", dest="minimal", default=False, help="Automatically chooses options to allow this to work on low power machines. Implies --noprefetch, --threads 1, and --cachetime 30.")
     basic.add_option("--lastfm", action="store_true", dest="lastfm", default=False, help="Scrobble plays to last.fm. Will require a brief authorization step the first time it is used.")
+    basic.add_option("--embed-art", action="store_true", dest="art", default=False, help="Embed album art in MP3 files. Could make them significantly bigger.")
     encoder_options.add_option("--format", action="store", dest="enc_format", type="choice", default="mp3", choices=("mp3","ogg"), help="What lossy format should we transcode into? Choices: (ogg, mp3) Default: %default.")
     encoder_options.add_option("-v","--V", action="store", dest="v", type="choice", default="2", choices=(map(lambda x:str(x),range(0,10))), help="What v level mp3 do you want to transcode to? Default: %default.")
     encoder_options.add_option("-q","--Q", action="store", dest="q", type="choice", default="6", choices=(map(lambda x:str(x),range(0,10))), help="What q level Ogg vorbis do you want to transcode to? Default: %default.")
