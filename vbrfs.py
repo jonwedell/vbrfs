@@ -547,6 +547,7 @@ if __name__ == '__main__':
     advanced.add_option("--threads", action="store", dest="threads", default=cpu_count(), type="int", help="How many threads should we use? This should probably be set to the number of cores you have available. Default: %default")
     advanced.add_option("--cache-time", action="store", dest="cachetime", default=60, type="int", help="How may seconds should we keep the transcoded files in RAM after they are last touched? 0 removes them as soon as the file descriptor is released.")
     advanced.add_option("--normalize-perms", action="store_true", dest="modperms", default=False, help="Should we present all files and folders as read only?")
+    advanced.add_option("--allow-other", action="store_true", dest="allow_other", default=False, help="Should we allow other users to access the vbr filesystem? Must first enable in /etc/fuse.conf")
     devel.add_option("--always-conv", action="store_true", dest="attrbconv", default=False, help="Will convert flac->vbr format even for things like 'ls'. Only needed if you want 'ls' to show the right file size, but doing so will be very slow. (You are forcing vbrfs to transcode a directory just to 'ls'.)")
     devel.add_option("--quiet", action="store_false", dest="debug", default=True, help="Only log critical events.")
     devel.add_option("--log-file", action="store", dest="logfile", help="The file to log to.")
@@ -653,7 +654,10 @@ if __name__ == '__main__':
 
         # Trying to run in the background with the fuse module is broken and I don't know why so we fork-exec instead
         try:
-            FUSE(vbr, args[1], foreground=True)
+	    if options.allow_other:
+                FUSE(vbr, args[1], foreground=True, allow_other=True)
+            else:
+                FUSE(vbr, args[1], foreground=True)
         except RuntimeError as e:
             logger.critical("We encountered a runtime error when attempting to run FUSE.")
             if not options.foreground:
