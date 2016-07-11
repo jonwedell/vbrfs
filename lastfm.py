@@ -18,11 +18,13 @@
 #    with this program; if not, write to the Free Software Foundation, Inc.,
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+from __future__ import print_function
+
 import os
-from hashlib import md5
-from time import time as unixtime
-import requests
 import webbrowser
+from hashlib import md5
+
+import requests
 
 # Store the api_key and secret using ROT26 encryption to prevent theft
 api_key = 'f9629d0d0a7d28285d07878c400db123'
@@ -44,14 +46,16 @@ def add_secret(payload):
 
 def scrobble(tags, init_time):
 
-    payload = {'api_key': api_key, 'method': 'track.scrobble', 'sk': session_key}
+    payload = {'api_key': api_key, 'method': 'track.scrobble',
+               'sk': session_key}
 
     # We can't scrobble if we don't know the artist and the track
     try:
         payload['artist'] = tags['artist']
         payload['track'] = tags['title']
     except KeyError:
-        return (1,"Missing artist or title. Artist: %s Title: %s" % (tags.get('artist',"?"),tags.get('title',"?")))
+        return (1, "Missing artist or title. Artist: %s Title:"
+                   "%s" % (tags.get('artist', "?"), tags.get('title', "?")))
 
     # Add optional tags
     if tags.get('album', None):
@@ -76,22 +80,22 @@ def scrobble(tags, init_time):
 
     # Process the request, look for errors
     if r.status_code != 200:
-        return (r.status_code,r.text)
+        return (r.status_code, r.text)
 
     json = r.json()
 
     # Check for an error message
     try:
-        if json.get('error',None):
+        if json.get('error', None):
             return (int(json['error']), json['message'])
     except KeyError:
         pass
     finally:
-        return (200,json)
+        return (200, json)
 
 def initialize():
 
-    print "Authorizing VBRFS with last.fm..."
+    print("Authorizing VBRFS with last.fm...")
 
     # First we need an auth token
     payload = {'api_key': api_key, 'format': 'json', 'method': 'auth.gettoken'}
@@ -100,8 +104,12 @@ def initialize():
     token = r.json()['token']
 
     # Then we send them to the website to approve
-    webbrowser.open("http://www.last.fm/api/auth/?api_key=%s&token=%s" % (api_key,token), new=1)
-    print "Please authorize VBRFS to scrobble using the page that should have opened in your web browser.\nIf you do not see a page, please go to: http://www.last.fm/api/auth/?api_key=%s&token=%s\n" % (api_key,token)
+    url = "http://www.last.fm/api/auth/?api_key=%s&token=%s" % (api_key, token)
+    webbrowser.open(url, new=1)
+    print("Please authorize VBRFS to scrobble using the page that should have "
+          "opened in your web browser.\nIf you do not see a page, please go "
+          "to: http://www.last.fm/api/auth/?api_key=%s&token=%s\n" %
+          (api_key, token))
     raw_input("Press enter once you have authorized VBRFS: ")
 
     # Then we can get the session key
@@ -111,14 +119,15 @@ def initialize():
     r = requests.get(request_url, params=payload, timeout=10)
 
     # Save the session key for future use
-    session_key = r.json()['session']['key']
-    open(os.path.expanduser("~/.vbrfs_lastfm_key"), "w").write(session_key)
+    gen_session_key = r.json()['session']['key']
+    open(os.path.expanduser("~/.vbrfs_lastfm_key"), "w").write(gen_session_key)
 
-    print "Done!"
+    print("Done!")
 
-    return session_key
+    return gen_session_key
 
-if not os.path.isfile(os.path.expanduser("~/.vbrfs_lastfm_key")) or __name__ == '__main__':
+if (__name__ == '__main__' or
+        not os.path.isfile(os.path.expanduser("~/.vbrfs_lastfm_key"))):
     session_key = initialize()
 else:
     session_key = open(os.path.expanduser("~/.vbrfs_lastfm_key"), "r").read()
